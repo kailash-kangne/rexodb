@@ -1,4 +1,6 @@
-# ⚡ rexodb
+<p align="center">
+  <img src="logo.png" alt="rexodb" width="420">
+</p>
 
 **Ultra-low-latency embedded key-value store for Rust — disruptor-grade writes, crash-proven durability.**
 
@@ -59,10 +61,13 @@ treat as ballpark, see `bench/` to reproduce.
 | Mode | Acknowledged write survives | Cost |
 |---|---|---|
 | `SyncPolicy::Always` / `put_durable` | process crash + power loss | ~one fsync per commit |
-| `EveryMs(ms)` (default `1`) | process crash; power loss ≤ `ms` | none per write |
+| `EveryMs(ms)` (default `1`) | process crash; power loss ≤ `ms`, timer-driven even when idle | none per write |
 | `Never` | nothing — call `db.sync()` yourself | none |
 
 - **CRC32 per WAL record** — a torn tail is detected and dropped on replay.
+- **CRC32 per segment entry + per index/bloom block** — bit-rot in a segment
+  surfaces as `Corrupt` on read (`Reader::verify` checks a whole file);
+  it can never return wrong data.
 - **Directory fsyncs** on every create/rename — a crash can't lose a file's
   *name* even though its contents were fsynced.
 - **Lockfile** — two processes can't open the same dir concurrently.
@@ -134,7 +139,7 @@ db.close()?;  // fsync + drain background work + release lock
 db/
 ├── LOCK                        exclusive flock — single owner
 ├── wal/0000000000000005.log    crc32 | len | payload frames, append-only
-└── seg/0000000000000007.sst    sorted entries + sparse index + XXH3 bloom + footer
+└── seg/0000000000000007.sst    crc'd entries + sparse index + XXH3 bloom + footer
 ```
 
 - **Memtable** — `BTreeMap`; rotates to a segment at `memtable_bytes`.

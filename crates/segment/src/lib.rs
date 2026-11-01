@@ -2,13 +2,21 @@
 //!
 //! ```text
 //! data    = entry*                       (sorted by key, ascending)
-//! entry   = klen u32 | vlen u32 | key | value
+//! entry   = klen u32 | vlen u32 | key | value | crc u32
 //!           vlen == u32::MAX marks a tombstone (delete), no value bytes
+//!           crc32 covers klen|vlen|key|value — checked on every read
 //! index   = (klen u32 | offset u64 | key)*   sparse: every INDEX_EVERY-th key
 //! bloom   = bloom bit array (10 bits/entry, k=7 probes, XXH3 + double-hash)
 //! footer  = index_off u64 | index_len u32 | bloom_off u64 | bloom_len u32
-//!         | count u64 | magic u64          (40 B, EOF)
+//!         | count u64 | index_crc u32 | bloom_crc u32 | magic u64  (48 B, EOF)
 //! ```
+//!
+//! Every entry read (point `get`, iterators, compaction) verifies its CRC
+//! as the bytes stream through, so bit-rot surfaces as
+//! [`SegmentError::Corrupt`] instead of wrong data. The index and bloom
+//! CRCs are checked at open — both blocks are read there anyway, so the
+//! check costs one extra hash and no I/O. [`Reader::verify`] re-checks the
+//! whole data region on demand.
 //!
 //! A point `get` first asks the bloom filter — "definitely absent" answers
 //! skip the disk entirely (~1% false-positive rate, zero false negatives).
@@ -32,13 +40,14 @@ use std::os::unix::fs::FileExt;
 use bytes::Bytes;
 use xxhash_rust::xxh3::xxh3_64;
 
-const MAGIC: u64 = u64::from_le_bytes(*b"RXSSEG02");
+const MAGIC: u64 = u64::from_le_bytes(*b"RXSSEG03");
 /// Process-unique id per opened file — unlike `id` (the filename gen,
 /// which a merged segment inherits from its oldest input), a `uid` is
 /// never shared between two different files.
 static NEXT_UID: AtomicU64 = AtomicU64::new(1);
 const TOMBSTONE: u32 = u32::MAX;
-const FOOTER_LEN: u64 = 40;
+const FOOTER_LEN: u64 = 48;
+const CRC_LEN: usize = 4;
 const CHUNK: usize = 64 * 1024;
 
 // Bloom parameters — fixed by the format, not stored: bit count is
@@ -143,20 +152,31 @@ impl Builder {
             self.index.push((Bytes::copy_from_slice(key), self.off));
         }
         self.hashes.push(xxh3_64(key));
-        self.w.write_all(&(key.len() as u32).to_le_bytes())?;
+        let mut h = crc32fast::Hasher::new();
+        let klen = (key.len() as u32).to_le_bytes();
+        h.update(&klen);
+        self.w.write_all(&klen)?;
         match value {
             Some(v) => {
-                self.w.write_all(&(v.len() as u32).to_le_bytes())?;
+                let vlen = (v.len() as u32).to_le_bytes();
+                h.update(&vlen);
+                h.update(key);
+                h.update(v);
+                self.w.write_all(&vlen)?;
                 self.w.write_all(key)?;
                 self.w.write_all(v)?;
-                self.off += 8 + key.len() as u64 + v.len() as u64;
+                self.off += 12 + key.len() as u64 + v.len() as u64;
             }
             None => {
-                self.w.write_all(&TOMBSTONE.to_le_bytes())?;
+                let vlen = TOMBSTONE.to_le_bytes();
+                h.update(&vlen);
+                h.update(key);
+                self.w.write_all(&vlen)?;
                 self.w.write_all(key)?;
-                self.off += 8 + key.len() as u64;
+                self.off += 12 + key.len() as u64;
             }
         }
+        self.w.write_all(&h.finalize().to_le_bytes())?;
         self.last_key = Some(Bytes::copy_from_slice(key));
         self.count += 1;
         Ok(())
@@ -167,14 +187,21 @@ impl Builder {
     pub fn finish(mut self) -> Result<(u64, u64), SegmentError> {
         let index_off = self.off;
         let mut index_len = 0u64;
+        let mut index_crc = crc32fast::Hasher::new();
         for (key, off) in &self.index {
-            self.w.write_all(&(key.len() as u32).to_le_bytes())?;
-            self.w.write_all(&off.to_le_bytes())?;
+            let klen = (key.len() as u32).to_le_bytes();
+            let off = off.to_le_bytes();
+            index_crc.update(&klen);
+            index_crc.update(&off);
+            index_crc.update(key);
+            self.w.write_all(&klen)?;
+            self.w.write_all(&off)?;
             self.w.write_all(key)?;
             index_len += 12 + key.len() as u64;
         }
         let bloom_off = index_off + index_len;
         let bloom = bloom_build(self.count, &self.hashes);
+        let bloom_crc = crc32fast::hash(&bloom);
         self.w.write_all(&bloom)?;
         let bloom_len = bloom.len() as u64;
         self.w.write_all(&index_off.to_le_bytes())?;
@@ -182,6 +209,8 @@ impl Builder {
         self.w.write_all(&bloom_off.to_le_bytes())?;
         self.w.write_all(&(bloom_len as u32).to_le_bytes())?;
         self.w.write_all(&self.count.to_le_bytes())?;
+        self.w.write_all(&index_crc.finalize().to_le_bytes())?;
+        self.w.write_all(&bloom_crc.to_le_bytes())?;
         self.w.write_all(&MAGIC.to_le_bytes())?;
         self.w.flush()?;
         let file = self.w.into_inner().map_err(|e| e.into_error())?;
@@ -250,7 +279,9 @@ impl Reader {
         let bloom_off = u64::from_le_bytes(footer[12..20].try_into().unwrap());
         let bloom_len = u32::from_le_bytes(footer[20..24].try_into().unwrap()) as u64;
         let count = u64::from_le_bytes(footer[24..32].try_into().unwrap());
-        if u64::from_le_bytes(footer[32..40].try_into().unwrap()) != MAGIC {
+        let index_crc = u32::from_le_bytes(footer[32..36].try_into().unwrap());
+        let bloom_crc = u32::from_le_bytes(footer[36..40].try_into().unwrap());
+        if u64::from_le_bytes(footer[40..48].try_into().unwrap()) != MAGIC {
             return Err(SegmentError::Corrupt("bad magic"));
         }
         if index_off.checked_add(index_len) != Some(bloom_off)
@@ -260,6 +291,9 @@ impl Reader {
         }
         let mut raw = vec![0u8; index_len as usize];
         file.pread_at(&mut raw, index_off)?;
+        if crc32fast::hash(&raw) != index_crc {
+            return Err(SegmentError::Corrupt("index crc mismatch"));
+        }
         let mut index = Vec::new();
         let mut pos = 0usize;
         while pos < raw.len() {
@@ -277,6 +311,9 @@ impl Reader {
         }
         let mut bloom = vec![0u8; bloom_len as usize];
         file.pread_at(&mut bloom, bloom_off)?;
+        if crc32fast::hash(&bloom) != bloom_crc {
+            return Err(SegmentError::Corrupt("bloom crc mismatch"));
+        }
         let id = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok()).unwrap_or(0);
         let uid = NEXT_UID.fetch_add(1, Ordering::Relaxed);
         Ok(Self { file, path: path.to_path_buf(), id, uid, index, index_off, bloom, count, bytes: len })
@@ -314,25 +351,36 @@ impl Reader {
         let Some((start, end)) = self.floor(key) else { return Ok(None) };
         let mut cur = Cursor::new(&self.file, start, end);
         loop {
-            let Some((klen, vlen)) = read_header(&mut cur)? else { return Ok(None) };
-            {
-                let k = cur.take(klen)?;
-                match k.cmp(key) {
-                    std::cmp::Ordering::Less => {
-                        if vlen != TOMBSTONE {
-                            cur.skip(vlen as u64)?;
-                        }
-                        continue;
+            let Some((klen, vlen)) = entry_begin(&mut cur)? else { return Ok(None) };
+            match cur.take(klen)?.cmp(key) {
+                std::cmp::Ordering::Less => {
+                    if vlen != TOMBSTONE {
+                        cur.skip(vlen as u64)?;
                     }
-                    std::cmp::Ordering::Greater => return Ok(None),
-                    std::cmp::Ordering::Equal => {}
+                    entry_crc(&mut cur)?;
+                    continue;
+                }
+                // The entry past the target is still read + verified before
+                // its key is trusted to end the scan — a corrupted key must
+                // not silently answer "absent".
+                std::cmp::Ordering::Greater => {
+                    if vlen != TOMBSTONE {
+                        cur.skip(vlen as u64)?;
+                    }
+                    entry_crc(&mut cur)?;
+                    return Ok(None);
+                }
+                std::cmp::Ordering::Equal => {
+                    return if vlen == TOMBSTONE {
+                        entry_crc(&mut cur)?;
+                        Ok(Some(Found::Tombstone))
+                    } else {
+                        let v = Bytes::copy_from_slice(cur.take(vlen as usize)?);
+                        entry_crc(&mut cur)?;
+                        Ok(Some(Found::Value(v)))
+                    };
                 }
             }
-            return if vlen == TOMBSTONE {
-                Ok(Some(Found::Tombstone))
-            } else {
-                Ok(Some(Found::Value(Bytes::copy_from_slice(cur.take(vlen as usize)?))))
-            };
         }
     }
 
@@ -352,6 +400,15 @@ impl Reader {
             skip_to: if pos == 0 { None } else { Some(Bytes::copy_from_slice(start)) },
         })
     }
+
+    /// Full integrity pass: streams every entry and checks its CRC (the
+    /// index and bloom CRCs already ran at `open`). The on-demand check
+    /// behind a `verify` CLI/offline tool — costs one sequential read.
+    pub fn verify(&self) -> Result<(), SegmentError> {
+        let mut it = self.iter()?;
+        while it.next_entry()?.is_some() {}
+        Ok(())
+    }
 }
 
 /// Bounded forward-only reader over `[pos, end)` of the file. Keeps one
@@ -363,11 +420,14 @@ struct Cursor<F: ReadAt> {
     buf: Vec<u8>,
     start: usize,
     len: usize,
+    /// When armed, every byte consumed via `take`/`skip`/`u32` is hashed —
+    /// entry CRCs verify as the entry streams past, no second read pass.
+    hasher: Option<crc32fast::Hasher>,
 }
 
 impl<F: ReadAt> Cursor<F> {
     fn new(file: F, pos: u64, end: u64) -> Self {
-        Self { file, pos, end, buf: vec![0; CHUNK], start: 0, len: 0 }
+        Self { file, pos, end, buf: vec![0; CHUNK], start: 0, len: 0, hasher: None }
     }
 
     /// Bytes still buffered but unconsumed.
@@ -413,6 +473,9 @@ impl<F: ReadAt> Cursor<F> {
             }
         }
         let s = &self.buf[self.start..self.start + n];
+        if let Some(h) = &mut self.hasher {
+            h.update(s);
+        }
         self.start += n;
         Ok(s)
     }
@@ -430,6 +493,9 @@ impl<F: ReadAt> Cursor<F> {
                 return Err(SegmentError::Corrupt("unexpected end of segment"));
             }
             let take = self.avail().min(n as usize);
+            if let Some(h) = &mut self.hasher {
+                h.update(&self.buf[self.start..self.start + take]);
+            }
             self.start += take;
             n -= take as u64;
         }
@@ -449,11 +515,29 @@ fn read_header<F: ReadAt>(cur: &mut Cursor<F>) -> Result<Option<(usize, u32)>, S
     let vlen = cur.u32()?;
     // Bound both lengths by what remains in the region before anyone
     // allocates against them.
-    let need = 8u64 + klen as u64 + if vlen == TOMBSTONE { 0 } else { vlen as u64 };
+    let need = 8u64 + klen as u64 + if vlen == TOMBSTONE { 0 } else { vlen as u64 } + CRC_LEN as u64;
     if need > cur.remaining() + 8 {
         return Err(SegmentError::Corrupt("entry exceeds region"));
     }
     Ok(Some((klen, vlen)))
+}
+
+/// Start one checksummed entry: arm the cursor hasher, then read the
+/// `(klen, vlen)` header. `Ok(None)` at region end.
+fn entry_begin<F: ReadAt>(cur: &mut Cursor<F>) -> Result<Option<(usize, u32)>, SegmentError> {
+    cur.hasher = Some(crc32fast::Hasher::new());
+    read_header(cur)
+}
+
+/// Read the CRC trailing the entry just consumed (the field itself is not
+/// hashed — the hasher is detached first) and verify it.
+fn entry_crc<F: ReadAt>(cur: &mut Cursor<F>) -> Result<(), SegmentError> {
+    let Some(h) = cur.hasher.take() else { return Ok(()) };
+    let want = u32::from_le_bytes(cur.take(CRC_LEN)?.try_into().unwrap());
+    if h.finalize() != want {
+        return Err(SegmentError::Corrupt("entry crc mismatch"));
+    }
+    Ok(())
 }
 
 /// Sequential entry iterator over a whole segment. Owns its file handle, so
@@ -468,13 +552,14 @@ pub struct SegmentIter {
 impl SegmentIter {
     pub fn next_entry(&mut self) -> Result<Option<(Bytes, Option<Bytes>)>, SegmentError> {
         loop {
-            let Some((klen, vlen)) = read_header(&mut self.cur)? else { return Ok(None) };
+            let Some((klen, vlen)) = entry_begin(&mut self.cur)? else { return Ok(None) };
             let key = Bytes::copy_from_slice(self.cur.take(klen)?);
             let val = if vlen == TOMBSTONE {
                 None
             } else {
                 Some(Bytes::copy_from_slice(self.cur.take(vlen as usize)?))
             };
+            entry_crc(&mut self.cur)?;
             if let Some(start) = &self.skip_to {
                 if key.as_ref() < start.as_ref() {
                     continue;
@@ -583,5 +668,47 @@ mod tests {
         }
         // And absent keys are cheaply rejected (mostly — FPs just fall through).
         assert_eq!(r.get(b"not-there").unwrap(), None);
+    }
+
+    fn flip(path: &Path, off: u64) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = OpenOptions::new().read(true).write(true).open(path).unwrap();
+        f.seek(SeekFrom::Start(off)).unwrap();
+        let mut b = [0u8; 1];
+        std::io::Read::read_exact(&mut f, &mut b).unwrap();
+        b[0] ^= 0xff;
+        f.seek(SeekFrom::Start(off)).unwrap();
+        f.write_all(&b).unwrap();
+    }
+
+    #[test]
+    fn corrupt_entry_detected_on_read_and_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("6.sst");
+        // index_every=2 → gap0 = entries a,b (a@0, b@14); gap1 = c@27.
+        build(&path, &[(b"a", Some(b"1")), (b"b", None), (b"c", Some(b"3"))]);
+        // Byte 9 = entry a's value byte ("1" at klen|vlen|key).
+        flip(&path, 9);
+        let r = Reader::open(&path).unwrap();
+        assert!(r.get(b"a").is_err(), "corrupt entry passed crc");
+        assert!(r.verify().is_err(), "verify missed corrupt entry");
+        // An uncorrupted gap still reads fine — checksums are per-entry.
+        assert_eq!(r.get(b"c").unwrap(), Some(Found::Value(Bytes::from_static(b"3"))));
+    }
+
+    #[test]
+    fn corrupt_index_and_bloom_detected_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("7.sst");
+        build(&path, &[(b"a", Some(b"1")), (b"b", None), (b"c", Some(b"3"))]);
+        let len = std::fs::metadata(&path).unwrap().len();
+        // index_off = 41 (3 entries of 14/13/14 bytes) → first index byte.
+        flip(&path, 41);
+        assert!(Reader::open(&path).is_err(), "corrupt index passed crc");
+
+        // Rebuild clean, then flip a bloom byte (just before the footer).
+        build(&path, &[(b"a", Some(b"1")), (b"b", None), (b"c", Some(b"3"))]);
+        flip(&path, len - FOOTER_LEN - 1);
+        assert!(Reader::open(&path).is_err(), "corrupt bloom passed crc");
     }
 }

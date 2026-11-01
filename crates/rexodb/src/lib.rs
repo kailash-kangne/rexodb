@@ -15,8 +15,9 @@
 //!   record is written *and* fsync'd — an acknowledged write survives
 //!   power loss.
 //! - [`SyncPolicy::EveryMs(ms)`]: acknowledged writes are guaranteed queued to
-//!   the WAL in order; the writer fsyncs at least every `ms` under load — a
-//!   crash loses at most ~`ms` of acknowledged writes.
+//!   the WAL in order; the writer fsyncs at least every `ms` while unfsync'd
+//!   data is outstanding, load or no load — a crash loses at most ~`ms` of
+//!   acknowledged writes.
 //! - [`SyncPolicy::Never`]: acknowledged writes may live only in kernel/user
 //!   buffers; loss window is OS-dependent. Call [`Db::sync`] for an explicit
 //!   durability barrier with any policy.
@@ -58,6 +59,12 @@ use rexodb_segment as segment;
 use rexodb_wal::{self as wal, Op};
 
 pub use rexodb_wal::SyncPolicy;
+
+/// Crash-injection points at every on-disk storage transition — armed via
+/// `REXO_CRASH_AT`/`REXO_CRASH_AFTER`, used by `tests/crash_points.rs`.
+/// No-ops when the env vars are unset.
+#[doc(hidden)]
+pub use rexodb_wal::crash;
 
 use memtable::Memtable;
 
@@ -395,6 +402,9 @@ impl Db {
                 segs.insert(0, Arc::new(r));
             }
             mem = Memtable::default();
+            // Replayed data is committed as a segment but its WAL files
+            // still exist — a crash here must replay idempotently.
+            crash::point(crash::RECOVERY_FOLDED);
         }
         // Replayed WALs are now covered by segments (or held nothing valid) —
         // delete them all to restore the single-live-WAL invariant.
@@ -925,6 +935,7 @@ impl Db {
         self.inner.wal_gen.store(new_gen, Ordering::SeqCst);
         let old = Arc::new(std::mem::take(&mut *self.inner.mem.write()));
         self.inner.imm.store(Arc::new(Some(old.clone())));
+        crash::point(crash::FREEZE_SWAPPED); // imm published; flush not yet spawned
         Ok(Some((gen, old)))
     }
 
@@ -970,6 +981,7 @@ fn commit_flush(inner: &Arc<Inner>, wal_gen: u64, mem: &Arc<Memtable>) -> Result
     match res {
         Ok(reader) => {
             if let Some(r) = reader {
+                crash::point(crash::SEG_RENAMED); // committed on disk; list update pending
                 let r = Arc::new(r);
                 inner.segs.rcu(|segs| {
                     let mut next = segs.as_ref().clone();
@@ -977,6 +989,7 @@ fn commit_flush(inner: &Arc<Inner>, wal_gen: u64, mem: &Arc<Memtable>) -> Result
                     next
                 });
             }
+            crash::point(crash::FLUSH_PUBLISHED); // readers see it; wal unlink pending
             let _ = fs::remove_file(inner.wal_path(wal_gen));
             inner.counters.flushes.fetch_add(1, Ordering::Relaxed);
             inner.imm.store(Arc::new(None));
@@ -1032,6 +1045,7 @@ fn merge_segments(
         }
     }
     let (count, _) = b.finish()?;
+    crash::point(crash::MERGE_TMP); // merged tmp fsynced; rename pending
     // The merged run takes the OLDEST input's slot, so it reuses that
     // input's gen — a fresh gen would sort the output *newest* at reopen
     // (filename order = recency) and resurrect data shadowed by younger
@@ -1044,6 +1058,7 @@ fn merge_segments(
         let path = inputs.last().expect("non-empty inputs").path.clone();
         fs::rename(&tmp, &path)?;
         sync_parent(&path)?;
+        crash::point(crash::MERGE_RENAMED); // merged file live; inputs pending unlink
         Some(Arc::new(segment::Reader::open(&path)?))
     };
     inner.segs.rcu(|segs| {
@@ -1166,6 +1181,7 @@ fn write_segment(
         return Ok(None);
     }
     let path = seg_dir.join(format!("{:016}.sst", next_file()));
+    crash::point(crash::SEG_TMP); // segment fsynced; rename is the commit
     fs::rename(&tmp, &path)?;
     sync_parent(&path)?;
     Ok(Some(segment::Reader::open(&path)?))

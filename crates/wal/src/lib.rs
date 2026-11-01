@@ -27,6 +27,11 @@
 //! returned [`Append::wait`] — an acknowledged write is on disk before the
 //! caller is told. [`Writer::sync`] is the explicit "make everything so far
 //! durable" barrier regardless of policy.
+//!
+//! Under `EveryMs` the fsync cadence is driven by a deadline, not by job
+//! arrival: while the file holds unfsync'd bytes the writer waits on
+//! `recv_timeout` and fsyncs at the deadline even when no new work has
+//! arrived, so a quiet period can't stretch the loss window past `ms`.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
@@ -63,13 +68,66 @@ pub enum Op {
 /// | Policy | fsync frequency | Loss bound on crash |
 /// |--------|-----------------|---------------------|
 /// | `Always` | every batch | none for writes that waited on `Append::wait` |
-/// | `EveryMs(ms)` | at most `ms` stale | up to ~`ms` of writes |
+/// | `EveryMs(ms)` | at most `ms` stale, timer-driven even when idle | up to ~`ms` of writes |
 /// | `Never` | only via `sync()`/`rotate()` | OS-dependent |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncPolicy {
     Always,
     EveryMs(u64),
     Never,
+}
+
+/// Crash-injection hooks for the storage-transition test suite. Points are
+/// numbered across the whole engine (wal + rexodb share one id space);
+/// `REXO_CRASH_AT=<id>` arms a point and `REXO_CRASH_AFTER=<n>` fires it on
+/// the n-th hit (default 1). The armed point aborts the process — no
+/// destructors, no flushes: the same failure shape as SIGKILL.
+///
+/// Cost when unarmed is one atomic load; points sit only on storage
+/// transitions (fsync boundaries, rotations, renames), never per-record.
+#[doc(hidden)]
+pub mod crash {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    // wal writer-thread transitions (fired inside this crate)
+    pub const WAL_WRITE: u64 = 1;
+    pub const WAL_FSYNCED: u64 = 2;
+    pub const WAL_ROTATED: u64 = 3;
+    // rexodb-level transitions (fired from the rexodb crate)
+    pub const SEG_TMP: u64 = 4;
+    pub const SEG_RENAMED: u64 = 5;
+    pub const FLUSH_PUBLISHED: u64 = 6;
+    pub const MERGE_TMP: u64 = 7;
+    pub const MERGE_RENAMED: u64 = 8;
+    pub const RECOVERY_FOLDED: u64 = 9;
+    pub const PIPE_WRITTEN: u64 = 10;
+    pub const PIPE_FROZEN: u64 = 11;
+    pub const FREEZE_SWAPPED: u64 = 12;
+    /// Highest defined point id — tests iterate `1..=COUNT`.
+    pub const COUNT: u64 = 12;
+
+    static AT: OnceLock<u64> = OnceLock::new();
+    static AFTER: OnceLock<u64> = OnceLock::new();
+    static HITS: AtomicU64 = AtomicU64::new(0);
+
+    fn env_u64(name: &str) -> u64 {
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// Fire crash point `id` — aborts when it is the armed point's
+    /// `REXO_CRASH_AFTER`-th hit. No-op in every normal process.
+    #[inline]
+    pub fn point(id: u64) {
+        if *AT.get_or_init(|| env_u64("REXO_CRASH_AT")) != id {
+            return;
+        }
+        let after = (*AFTER.get_or_init(|| env_u64("REXO_CRASH_AFTER"))).max(1);
+        if HITS.fetch_add(1, Ordering::Relaxed) + 1 == after {
+            eprintln!("rexodb: crash point {id} hit #{after} — aborting");
+            std::process::abort();
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -186,6 +244,11 @@ impl Append {
 pub struct Writer {
     tx: Mutex<SyncSender<Job>>,
     io_failed: Arc<AtomicBool>,
+    /// fsync counter — observed only by tests (idle-fsync regression), but
+    /// kept unconditionally so the writer thread code is identical in both
+    /// build modes.
+    #[allow(dead_code)]
+    fsyncs: Arc<std::sync::atomic::AtomicU64>,
     _worker: thread::JoinHandle<()>,
 }
 
@@ -197,12 +260,14 @@ impl Writer {
         let file = open_append(path)?;
         let (tx, rx) = mpsc::sync_channel(4096);
         let io_failed = Arc::new(AtomicBool::new(false));
+        let fsyncs = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let flag = io_failed.clone();
+        let fcount = fsyncs.clone();
         let worker = thread::Builder::new()
             .name("rexodb-wal-writer".into())
-            .spawn(move || writer_loop(file, rx, policy, flag))
+            .spawn(move || writer_loop(file, rx, policy, flag, fcount))
             .map_err(|e| io::Error::other(format!("failed to spawn wal writer: {e}")))?;
-        Ok(Self { tx: Mutex::new(tx), io_failed, _worker: worker })
+        Ok(Self { tx: Mutex::new(tx), io_failed, fsyncs, _worker: worker })
     }
 
     /// Queues `ops` as one atomic record. With `need_ack`, the returned
@@ -299,20 +364,57 @@ fn resolve(acks: &mut Vec<SyncSender<io::Result<()>>>, res: &io::Result<()>) {
 /// write/fsync failure the loop keeps draining (so callers' acks never hang)
 /// but every subsequent job just gets the stored error back — `io_failed`
 /// tells the Db layer to refuse new writes.
-fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed: Arc<AtomicBool>) {
+fn writer_loop(
+    mut file: File,
+    rx: Receiver<Job>,
+    policy: SyncPolicy,
+    io_failed: Arc<AtomicBool>,
+    fsyncs: Arc<std::sync::atomic::AtomicU64>,
+) {
     let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
     let mut acks: Vec<SyncSender<io::Result<()>>> = Vec::with_capacity(64);
     let mut last_fsync = Instant::now();
     let mut pending: Option<Job> = None;
     let mut failed: Option<io::Error> = None;
+    // True while the file holds written-but-unfsync'd bytes — the deadline
+    // wait below exists for exactly this state.
+    let mut dirty = false;
 
     loop {
         let first = match pending.take() {
             Some(j) => j,
-            None => match rx.recv() {
-                Ok(j) => j,
-                Err(_) => break,
-            },
+            None => {
+                // `EveryMs` bounds staleness by a timer, not by job
+                // arrival: with unfsync'd data outstanding, wait for work
+                // only until the next deadline, then fsync. Without this
+                // an idle writer would let the loss window grow without
+                // bound — the durability scheduling bug this fixes.
+                let timed = matches!(policy, SyncPolicy::EveryMs(_)) && dirty && failed.is_none();
+                if !timed {
+                    match rx.recv() {
+                        Ok(j) => j,
+                        Err(_) => break,
+                    }
+                } else {
+                    let SyncPolicy::EveryMs(ms) = policy else { unreachable!() };
+                    let rem = Duration::from_millis(ms).saturating_sub(last_fsync.elapsed());
+                    match rx.recv_timeout(rem) {
+                        Ok(j) => j,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if let Err(e) = fsync(&file) {
+                                io_failed.store(true, Ordering::Relaxed);
+                                failed = Some(e);
+                            } else {
+                                fsyncs.fetch_add(1, Ordering::Relaxed);
+                            }
+                            last_fsync = Instant::now();
+                            dirty = false;
+                            continue;
+                        }
+                    }
+                }
+            }
         };
         let mut jobs = Vec::with_capacity(64);
         let mut bytes = job_size(&first);
@@ -347,14 +449,22 @@ fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed:
                     if failed.is_none() && !buf.is_empty() {
                         if let Err(e) = file.write_all(&buf).and_then(|_| fsync(&file)) {
                             failed = Some(e);
+                        } else {
+                            fsyncs.fetch_add(1, Ordering::Relaxed);
                         }
                     } else if failed.is_none() {
                         if let Err(e) = fsync(&file) {
                             failed = Some(e);
+                        } else {
+                            fsyncs.fetch_add(1, Ordering::Relaxed);
                         }
+                    }
+                    if failed.is_none() {
+                        crash::point(crash::WAL_FSYNCED);
                     }
                     buf.clear();
                     last_fsync = Instant::now();
+                    dirty = false;
                     let res = match &failed {
                         None => Ok(()),
                         Some(e) => Err(err_copy(e)),
@@ -374,8 +484,11 @@ fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed:
                                 // resolve only once it lands.
                                 let old = std::mem::replace(&mut file, f);
                                 let _ = ack.send(Ok(()));
+                                crash::point(crash::WAL_ROTATED);
                                 if let Err(e) = fsync(&old) {
                                     failed = Some(e);
+                                } else {
+                                    fsyncs.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                             Err(e) => {
@@ -386,6 +499,7 @@ fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed:
                     }
                     buf.clear();
                     last_fsync = Instant::now();
+                    dirty = false;
                     if let Some(e) = &failed {
                         resolve(&mut acks, &Err(err_copy(e)));
                     } else {
@@ -400,6 +514,7 @@ fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed:
                 if let Err(e) = file.write_all(&buf) {
                     failed = Some(e);
                 } else {
+                    crash::point(crash::WAL_WRITE);
                     let need_fsync = match policy {
                         SyncPolicy::Always => true,
                         SyncPolicy::EveryMs(ms) => last_fsync.elapsed() >= Duration::from_millis(ms),
@@ -408,9 +523,15 @@ fn writer_loop(mut file: File, rx: Receiver<Job>, policy: SyncPolicy, io_failed:
                     if need_fsync {
                         if let Err(e) = fsync(&file) {
                             failed = Some(e);
+                        } else {
+                            fsyncs.fetch_add(1, Ordering::Relaxed);
+                        }
+                        if failed.is_none() {
+                            crash::point(crash::WAL_FSYNCED);
                         }
                         last_fsync = Instant::now();
                     }
+                    dirty = !need_fsync;
                 }
             }
             buf.clear();
@@ -672,6 +793,26 @@ mod tests {
         replay(&p1, |rec| got.extend(rec)).unwrap();
         replay(&p2, |rec| got.extend(rec)).unwrap();
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn every_ms_fsyncs_unflushed_data_when_idle() {
+        // Regression: the writer used to fsync only when a later job
+        // arrived — an idle period could leave unfsync'd data past `ms`
+        // forever. Now the deadline must fire on its own.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("idle.log");
+        let w = Writer::open(&path, SyncPolicy::EveryMs(10)).unwrap();
+        w.append(&[Op::Put(Bytes::from_static(b"k"), Bytes::from_static(b"v"))], false)
+            .unwrap();
+        // The append is queued, not necessarily written yet — give the
+        // writer a moment to land it, then watch for the idle fsync.
+        std::thread::sleep(Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while w.fsyncs.load(Ordering::Relaxed) == 0 {
+            assert!(Instant::now() < deadline, "no fsync fired while writer idle");
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ use parking_lot::{Condvar, Mutex};
 use rexodb_wal::{self as wal, Op};
 
 use crate::memtable::Memtable;
-use crate::{commit_flush, Error, Inner, Result};
+use crate::{commit_flush, crash, Error, Inner, Result};
 
 enum Event {
     Ops {
@@ -601,6 +601,7 @@ impl Consumer {
         if self.shared.failed.lock().is_none() {
             match self.fw.flush() {
                 Ok(()) => {
+                    crash::point(crash::PIPE_WRITTEN); // in the file; apply pending
                     if upto > 0 {
                         self.shared.need.fetch_max(upto, Ordering::AcqRel);
                         self.shared.unpark_fsyncer();
@@ -669,6 +670,7 @@ impl Consumer {
             w.file = self.fw.file().clone();
         }
         self.shared.unpark_fsyncer();
+        crash::point(crash::PIPE_FROZEN); // rotation live; memtable swap pending
         let old = Arc::new(std::mem::take(&mut *inner.mem.write()));
         inner.imm.store(Arc::new(Some(old.clone())));
         Ok(Some(Frozen { wal_gen: old_gen, mem: old }))

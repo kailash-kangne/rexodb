@@ -81,6 +81,25 @@ crates/
   Reverted; would need SQPOLL + deep batching to win — revisit only if a
   real benchmark demands it.
 - Segment format v2 (`RXSSEG02`): `data | sparse index | bloom | 40B footer`.
+- Segment format v3 (`RXSSEG03`): entries are `klen|vlen|key|value|crc32`
+  (crc covers the rest); footer grew to 48B with `index_crc`/`bloom_crc`
+  (checked at `open`). Read paths verify entry CRCs as bytes stream through
+  the `Cursor` hasher — `get`, `iter`, compaction all detect corruption.
+  `Reader::verify()` = full-file pass for the future verify tool. v2 files
+  fail the magic check and are deleted on open, same as v1 was.
+- `wal::crash::point(id)` — env-gated crash injection (`REXO_CRASH_AT`,
+  `REXO_CRASH_AFTER`) at every on-disk transition; aborts like SIGKILL.
+  `tests/crash_points.rs` walks 1..=crash::COUNT × {Direct,Pipeline} ×
+  hit#{1,2}. Adding a transition = pick the next free id + bump COUNT.
+- `SyncPolicy::EveryMs` is now timer-driven, not job-arrival-driven: the
+  wal writer waits on `recv_timeout(deadline)` while unfsync'd data is
+  outstanding (`dirty` flag), so idle periods can't stretch the loss
+  window. Regression test: `wal::tests::every_ms_fsyncs_unflushed_data_when_idle`
+  (observed via the `Writer::fsyncs` counter).
+- `tests/model.rs` — proptest: generated op sequences vs `BTreeMap`
+  oracle, run simultaneously on Direct + Pipeline rigs (equivalence proof)
+  with flush/compact/sync/reopen interleaved. `proptest` is a dev-dep of
+  rexodb only.
 - `cache.rs`: 32-shard point cache keyed by (seg gen, key) — immutable
   segments + newest→oldest walk make stale hits impossible, no invalidation.
   `Config::cache_entries` (default 64k, 0=off); `Stats.cache_hits`.
