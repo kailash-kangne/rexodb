@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/logo.png">
+<title>rexodb</title>
+<style>
+  :root {
+    --bg:#07070d; --inset:#0c0c14; --panel:#111119; --panel2:#1a1a24;
+    --border:#22222f; --border2:#333345; --acc:#ef4444; --acc2:#fb923c;
+    --navpad:250px;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: #e8e8ee; margin: 0; padding: 1.6rem 2rem 2rem var(--navpad); }
+
+  /* sidebar */
+  #side { position: fixed; left: 0; top: 0; bottom: 0; width: 218px; background: linear-gradient(180deg, var(--panel), var(--inset)); border-right: 1px solid var(--border); padding: 1.2rem .65rem; display: flex; flex-direction: column; gap: .2rem; z-index: 50; }
+  #side .logo { display: flex; align-items: center; gap: .7rem; padding: .2rem .5rem .9rem; }
+  #side .logo img { height: 40px; border-radius: 8px; }
+  #side .lname { font-size: 1.15rem; font-weight: 800; background: linear-gradient(90deg, var(--acc), var(--acc2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  #side .lsub { font-size: .56rem; color: #55556a; letter-spacing: .14em; text-transform: uppercase; font-weight: 800; }
+  .nav-group { font-size: .6rem; color: #44445a; letter-spacing: .14em; text-transform: uppercase; font-weight: 800; padding: .95rem .7rem .3rem; }
+  .tab { display: flex; align-items: center; gap: .55rem; width: 100%; background: none; color: #8b8b9e; border: 0; border-left: 3px solid transparent; padding: .55rem .7rem; font-weight: 600; font-size: .88rem; cursor: pointer; border-radius: 8px; text-align: left; }
+  .tab:hover { background: var(--panel2); color: #fff; }
+  .tab.active { background: linear-gradient(90deg, rgba(239,68,68,.16), rgba(251,146,60,.07)); border-left-color: var(--acc); color: #fff; }
+  .nav-foot { margin-top: auto; padding: .8rem .6rem .2rem; border-top: 1px solid var(--border); font-size: .68rem; color: #55556a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-foot b { display: block; font-size: .58rem; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .2rem; }
+
+  /* live stat strip */
+  .topstats { display: flex; gap: 1.2rem; align-items: center; background: var(--inset); border: 1px solid var(--border); border-radius: 10px; padding: .5rem 1rem; margin-bottom: 1.2rem; font-size: .8rem; color: #9a9aa8; font-variant-numeric: tabular-nums; flex-wrap: wrap; }
+  .ts b { color: #55556a; font-size: .66rem; letter-spacing: .08em; text-transform: uppercase; margin-right: .35rem; }
+  .ts .rate { color: var(--acc2); font-weight: 700; }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; box-shadow: 0 0 8px #4ade80; animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 1.2rem 1.4rem; margin-bottom: 1.2rem; }
+  .panel h2 { font-size: .95rem; margin: 0 0 1rem; color: #d4d4de; }
+  section { display: none; }
+  section.on { display: block; }
+
+  .controls { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+  .controls:last-child { margin-bottom: 0; }
+  input, textarea { background: var(--inset); color: #fff; border: 1px solid var(--border); border-radius: 9px; padding: .55rem .7rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .83rem; }
+  input:focus, textarea:focus { outline: 2px solid var(--acc); border-color: var(--acc); }
+  input.small { width: 90px; }
+  button.act { background: linear-gradient(90deg, var(--acc), var(--acc2)); color: #fff; border: 0; padding: .55rem 1.15rem; border-radius: 9px; cursor: pointer; font-weight: 700; font-size: .85rem; }
+  button.sec { background: var(--panel2); color: #e8e8ee; font-weight: 600; border: 1px solid var(--border2); padding: .55rem 1.15rem; border-radius: 9px; cursor: pointer; font-size: .85rem; }
+  button:hover { filter: brightness(1.15); }
+  button:disabled { opacity: .5; cursor: wait; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: .64rem; color: #55556a; text-transform: uppercase; letter-spacing: .1em; padding: .25rem .7rem; }
+  td { border-top: 1px solid var(--border); padding: .45rem .7rem; font-size: .82rem; font-family: ui-monospace, Menlo, monospace; color: #c5c5d0; }
+  td.k { color: var(--acc2); white-space: nowrap; }
+  tbody tr:hover { background: var(--panel2); cursor: pointer; }
+  tbody tr.sel { background: linear-gradient(90deg, rgba(239,68,68,.14), rgba(251,146,60,.06)); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .8rem; margin-bottom: 1.1rem; }
+  .hero { background: linear-gradient(160deg, var(--panel2), var(--panel)); border: 1px solid var(--border); border-radius: 14px; padding: .9rem 1rem; }
+  .hero .k { color: #8a8a99; font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; }
+  .hero .v { font-size: 1.45rem; font-weight: 800; margin-top: .3rem; font-variant-numeric: tabular-nums; }
+  .hero .v.a { color: var(--acc); }
+  .hero .v.o { color: var(--acc2); }
+  .hero .sub { font-size: .68rem; color: #55556a; margin-top: .15rem; }
+
+  #chart { width: 100%; height: 180px; background: var(--inset); border: 1px solid var(--border); border-radius: 12px; }
+  .legend { display: flex; gap: 1.2rem; font-size: .72rem; color: #8a8a99; margin-top: .5rem; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: .3rem; vertical-align: middle; }
+
+  .note { background: var(--panel2); border-left: 4px solid var(--acc); padding: .8rem 1.1rem; border-radius: 10px; margin-bottom: 1rem; font-size: .85rem; color: #c5c5d0; line-height: 1.5; }
+  #key { width: 300px; }
+  #val { width: 100%; min-height: 66px; resize: vertical; margin-top: .7rem; }
+  #msg, #benchMsg { font-size: .78rem; color: #8a8a99; }
+  #msg.err, #benchMsg.err { color: #f87171; }
+  .hint { color: #44445a; font-size: .72rem; }
+</style>
+</head>
+<body>
+
+<nav id="side">
+  <div class="logo">
+    <img src="/logo.png" alt="">
+    <div><div class="lname">rexodb</div><div class="lsub">debug ui</div></div>
+  </div>
+  <div class="nav-group">database</div>
+  <button class="tab active" data-t="browse">▤ browse</button>
+  <button class="tab" data-t="editor">✎ editor</button>
+  <div class="nav-group">live</div>
+  <button class="tab" data-t="monitor">◉ monitor</button>
+  <button class="tab" data-t="speed">⚡ speed test</button>
+  <div class="nav-foot"><b>database dir</b><span title="__DBDIR__">__DBDIR__</span></div>
+</nav>
+
+<main>
+  <div class="topstats">
+    <span class="ts"><span class="live-dot"></span></span>
+    <span class="ts"><b>puts/s</b><span class="rate" id="rPut">0</span></span>
+    <span class="ts"><b>gets/s</b><span class="rate" id="rGet">0</span></span>
+    <span class="ts"><b>keys</b><span id="sKeys">–</span></span>
+    <span class="ts"><b>segments</b><span id="sSegs">–</span></span>
+    <span class="ts"><b>memtable</b><span id="sMem">–</span></span>
+    <span class="ts"><span id="msg"></span></span>
+  </div>
+
+  <section id="browse" class="on">
+    <div class="panel">
+      <h2>Browse</h2>
+      <div class="controls">
+        <input id="prefix" placeholder="prefix — e.g. user: (filters as you type)" style="width:340px">
+        <input id="limit" class="small" value="200" title="max rows">
+        <button class="act" onclick="scan()">scan</button>
+      </div>
+      <table>
+        <thead><tr><th>key</th><th>value</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="editor">
+    <div class="panel">
+      <h2>Editor</h2>
+      <div class="controls">
+        <input id="key" placeholder="key">
+        <button class="sec" onclick="get()">get</button>
+        <button class="act" onclick="put()">put</button>
+        <button class="sec" onclick="del()">del</button>
+        <span class="hint">prefix any input with 0x for hex-encoded binary</span>
+      </div>
+      <textarea id="val" placeholder="value"></textarea>
+    </div>
+  </section>
+
+  <section id="monitor">
+    <div class="panel">
+      <h2>Live throughput — ops/s sampled every second</h2>
+      <canvas id="chart"></canvas>
+      <div class="legend">
+        <span><i style="background:var(--acc)"></i>puts/s</span>
+        <span><i style="background:var(--acc2)"></i>gets/s</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Counters</h2>
+      <div class="cards" id="cards"></div>
+      <div class="controls">
+        <button class="sec" onclick="admin('flush')">flush</button>
+        <button class="sec" onclick="admin('compact')">compact</button>
+        <span class="hint">flush writes the memtable to a segment · compact merges all segments</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="speed">
+    <div class="panel">
+      <h2>Speed test</h2>
+      <div class="note">
+        Times real <code>put</code>/<code>get</code> ops against this open database —
+        hot-path numbers (memtable + cache), then deletes the temp keys.
+        Not a durability benchmark; use <code>cargo bench</code> for that.
+      </div>
+      <div class="controls">
+        <input id="ops" class="small" value="10000" title="ops">
+        <button class="act" id="benchBtn" onclick="bench()">run</button>
+        <span id="benchMsg"></span>
+      </div>
+      <div class="cards" id="benchCards"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const msg = (t, err) => { $('msg').textContent = t; $('msg').className = err ? 'err' : ''; };
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const enc = s => s.startsWith('0x')
+  ? s.slice(2)
+  : [...new TextEncoder().encode(s)].map(b => b.toString(16).padStart(2, '0')).join('');
+const dec = h => {
+  const b = Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(b); }
+  catch { return '0x' + h; }
+};
+const fmt = n => n < 1024 ? n : n < 1 << 20 ? (n / 1024).toFixed(1) + ' KiB' : (n / (1 << 20)).toFixed(1) + ' MiB';
+const fmtN = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : '' + n;
+async function api(url, opt) {
+  const r = await fetch(url, opt);
+  const t = await r.text();
+  if (!r.ok) throw new Error(t || r.status);
+  return t;
+}
+
+// tabs
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('main section').forEach(s => s.classList.toggle('on', s.id === b.dataset.t));
+  if (b.dataset.t === 'browse') scan(); // always fresh when returning
+});
+
+async function scan() {
+  try {
+    const q = `prefix=${enc($('prefix').value)}&limit=${$('limit').value || 200}`;
+    const rows = JSON.parse(await api('/api/scan?' + q));
+    $('rows').innerHTML = rows.map(([k, v]) =>
+      `<tr data-k="${k}" data-v="${v}"><td class="k">${esc(dec(k))}</td><td>${esc(dec(v))}</td></tr>`
+    ).join('');
+    document.querySelectorAll('#rows tr').forEach(tr => tr.onclick = () => {
+      document.querySelectorAll('#rows tr').forEach(r => r.classList.remove('sel'));
+      tr.classList.add('sel');
+      $('key').value = dec(tr.dataset.k);
+      $('val').value = dec(tr.dataset.v);
+      document.querySelector('[data-t="editor"]').click();
+    });
+    $('sKeys').textContent = rows.length;
+    msg(rows.length + ' rows');
+  } catch (e) { msg(e.message, true); }
+}
+async function get() {
+  try {
+    $('val').value = dec(JSON.parse(await api('/api/get?k=' + enc($('key').value))));
+    msg('ok');
+  } catch (e) { $('val').value = ''; msg(e.message, true); }
+}
+async function put() {
+  try {
+    await api('/api/put?k=' + enc($('key').value), { method: 'POST', body: enc($('val').value) });
+    msg('put ok'); scan();
+  } catch (e) { msg(e.message, true); }
+}
+async function del() {
+  try {
+    await api('/api/del?k=' + enc($('key').value), { method: 'POST' });
+    $('key').value = '';
+    $('val').value = '';
+    msg('deleted'); scan();
+  } catch (e) { msg(e.message, true); }
+}
+async function admin(cmd) {
+  try {
+    msg(cmd + '…');
+    await api('/api/' + cmd, { method: 'POST' });
+    await stats();
+    msg(cmd === 'flush'
+      ? 'flushed — memtable written to a segment'
+      : 'compacted — all segments merged into ' + $('sSegs').textContent);
+  } catch (e) { msg(cmd + ' failed: ' + e.message, true); }
+}
+
+// live stats → rates + counters + chart
+let prev = null;
+const hist = []; // {p, g}
+const MAX_SAMPLES = 90;
+async function stats() {
+  try {
+    const s = JSON.parse(await api('/api/stats'));
+    const now = Date.now() / 1000;
+    if (prev) {
+      const dt = now - prev.t;
+      const pr = (s.puts - prev.s.puts) / dt, gr = (s.gets - prev.s.gets) / dt;
+      $('rPut').textContent = fmtN(Math.round(pr));
+      $('rGet').textContent = fmtN(Math.round(gr));
+      hist.push({ p: pr, g: gr });
+      if (hist.length > MAX_SAMPLES) hist.shift();
+      draw();
+    }
+    prev = { t: now, s };
+    $('sSegs').textContent = s.live_segments;
+    $('sMem').textContent = fmt(s.memtable_bytes);
+    $('cards').innerHTML = [
+      ['puts', s.puts, 'a'], ['gets', s.gets, 'o'], ['deletes', s.deletes, ''],
+      ['memtable hits', s.memtable_hits, ''], ['segment reads', s.segment_reads, ''],
+      ['cache hits', s.cache_hits, ''], ['flushes', s.flushes, ''],
+      ['compactions', s.compactions, ''], ['batches', s.batches, ''],
+    ].map(([k, v, c]) => `<div class="hero"><div class="k">${k}</div><div class="v ${c}">${fmtN(v)}</div></div>`).join('');
+  } catch {}
+}
+function draw() {
+  const c = $('chart'), ctx = c.getContext('2d');
+  const w = c.width = c.clientWidth * devicePixelRatio, h = c.height = c.clientHeight * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  if (hist.length < 2) return;
+  const max = Math.max(1, ...hist.map(s => Math.max(s.p, s.g)));
+  const line = (key, color) => {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2 * devicePixelRatio;
+    hist.forEach((s, i) => {
+      const x = i / (MAX_SAMPLES - 1) * w, y = h - (s[key] / max) * (h - 14 * devicePixelRatio) - 6 * devicePixelRatio;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  };
+  line('p', '#ef4444'); line('g', '#fb923c');
+  ctx.fillStyle = '#55556a'; ctx.font = `${11 * devicePixelRatio}px monospace`;
+  ctx.fillText(`peak ${fmtN(Math.round(max))}/s`, 8 * devicePixelRatio, 14 * devicePixelRatio);
+}
+
+async function bench() {
+  const btn = $('benchBtn'), ops = Math.max(100, +$('ops').value || 10000);
+  btn.disabled = true;
+  $('benchMsg').textContent = `running ${fmtN(ops)} puts + ${fmtN(ops)} gets…`;
+  try {
+    const r = JSON.parse(await api('/api/bench?ops=' + ops));
+    const card = (k, v, sub, c) => `<div class="hero"><div class="k">${k}</div><div class="v ${c}">${v}</div><div class="sub">${sub}</div></div>`;
+    $('benchCards').innerHTML =
+      card('put', fmtN(r.put_ops_sec) + '/s', `p50 ${r.put_p50_us}µs · p99 ${r.put_p99_us}µs`, 'a') +
+      card('get', fmtN(r.get_ops_sec) + '/s', `p50 ${r.get_p50_us}µs · p99 ${r.get_p99_us}µs`, 'o');
+    $('benchMsg').textContent = 'done';
+  } catch (e) { $('benchMsg').textContent = e.message; $('benchMsg').className = 'err'; }
+  btn.disabled = false;
+}
+
+// scan-as-you-type on the prefix box (debounced)
+let deb;
+$('prefix').oninput = () => { clearTimeout(deb); deb = setTimeout(scan, 200); };
+
+scan(); stats(); setInterval(stats, 1000);
+</script>
+</body>
