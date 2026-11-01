@@ -3,11 +3,15 @@ name = "rexodb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
+description = "Embedded persistent key-value store tuned for low tail latency — Disruptor-style write path, WAL + LSM segments, crash-proven durability"
+keywords = ["key-value", "database", "embedded", "storage-engine", "lsm"]
+categories = ["database", "data-structures"]
 
 [dependencies]
-rexodb-wal = { path = "../wal" }
-rexodb-segment = { path = "../segment" }
+rexodb-wal = { path = "../wal", version = "0.1.0" }
+rexodb-segment = { path = "../segment", version = "0.1.0" }
 bytes.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true

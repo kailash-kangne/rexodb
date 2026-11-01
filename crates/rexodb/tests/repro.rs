@@ -82,7 +82,7 @@ fn repro_tombstone_loss() {
         }
         let db = Db::open(Config::new(&path)).unwrap();
         let got = db.get(b"k05").unwrap();
-        if got != None {
+        if got.is_some() {
             panic!("round {round}: tombstone lost (got {got:?});\n{}", dump(&path));
         }
         assert_eq!(db.get(b"k06").unwrap(), Some(Bytes::from_static(b"v")), "round {round}");

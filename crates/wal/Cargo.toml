@@ -3,7 +3,11 @@ name = "rexodb-wal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
+description = "Append-only write-ahead log with CRC32 records and group-commit writer thread — internals for rexodb"
+keywords = ["write-ahead-log", "wal", "durability", "database", "storage"]
+categories = ["database"]
 
 [dependencies]
 bytes.workspace = true

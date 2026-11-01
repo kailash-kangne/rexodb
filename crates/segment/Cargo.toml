@@ -3,7 +3,11 @@ name = "rexodb-segment"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 publish.workspace = true
+description = "Immutable sorted segment files with sparse index and bloom filters — internals for rexodb"
+keywords = ["lsm", "sstable", "bloom-filter", "storage", "key-value"]
+categories = ["database"]
 
 [dependencies]
 bytes.workspace = true

@@ -13,7 +13,8 @@ exclude = ["bench"]
 version = "0.1.0"
 edition = "2021"
 license = "BUSL-1.1"
-publish = false
+repository = "https://github.com/kailash-kangne/rexodb"
+publish = true
 
 [workspace.dependencies]
 bytes = "1"
