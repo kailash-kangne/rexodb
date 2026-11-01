@@ -1,0 +1,8 @@
+{
+ "rexodb|fill_rand|k16|v128|t1|periodic|disk|p0": 1319457.04342663,
+ "rexodb|fill_rand|k16|v128|t8|periodic|disk|p0": 892241.4166152661,
+ "rexodb|read_rand|k16|v128|t1|periodic|disk|p150000": 1878619.2539236466,
+ "rexodb|read_rand|k16|v128|t8|periodic|disk|p150000": 3474393.7182961577,
+ "rexodb|mixed_50_50|k16|v128|t1|periodic|disk|p150000": 734255.9553114204,
+ "rexodb|mixed_50_50|k16|v128|t8|periodic|disk|p150000": 816296.0111368897
+}

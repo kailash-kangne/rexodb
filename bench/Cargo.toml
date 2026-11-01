@@ -1,0 +1,30 @@
+[package]
+name = "rexodb-bench"
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[dependencies]
+rexodb = { path = "../crates/rexodb" }
+rexodb-wal = { path = "../crates/wal" }
+bytes = "1"
+crc32fast = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+heed = "0.22"
+redb = "2"
+rocksdb = { version = "0.22", optional = true }
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+rocksdb = ["dep:rocksdb"]
+mimalloc = ["dep:mimalloc"]
+
+# Match the workspace release profile so numbers are comparable.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wal",
+    "crates/segment",
+    "crates/rexodb",
+]
+# The benchmark harness lives in bench/ with its own heavy deps
+# (external DB engines); keep it out of the normal build/test graph.
+exclude = ["bench"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BUSL-1.1"
+publish = false
+
+[workspace.dependencies]
+bytes = "1"
+parking_lot = "0.12"
+thiserror = "2"
+crc32fast = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
