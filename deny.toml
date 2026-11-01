@@ -7,12 +7,13 @@ allow = [
     "Apache-2.0",
     "Unicode-3.0",
     "BSL-1.0",    # xxhash-rust (bloom filters)
+    "BUSL-1.1",   # our own crates
 ]
 confidence-threshold = 0.8
 
 [licenses.private]
-# Workspace crates are BUSL-1.1 + publish=false — this check is about
-# third-party dependencies, not our own code.
+# Workspace crates are BUSL-1.1 (allowed above) — this check is mainly
+# about third-party dependencies, not our own code.
 ignore = true
 
 [bans]
