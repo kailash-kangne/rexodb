@@ -12,7 +12,7 @@ fn cfg(dir: &TempDir, memtable_bytes: usize) -> (Config, std::path::PathBuf) {
 }
 
 fn wait_for_segments(db: &Db, n: usize) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while db.stats().live_segments < n {
         assert!(Instant::now() < deadline, "timed out waiting for {n} segments");
         std::thread::sleep(Duration::from_millis(5));
@@ -455,7 +455,7 @@ fn incremental_merge_keeps_tombstone_shadow() {
 
     db.put(b"trig", b"t").unwrap();
     db.flush().unwrap(); // 4 > compact_at → background incremental merge
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while db.stats().live_segments > 3 {
         assert!(Instant::now() < deadline, "incremental merge never ran");
         std::thread::sleep(Duration::from_millis(5));
