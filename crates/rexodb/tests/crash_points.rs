@@ -57,8 +57,8 @@ fn crash_point_child() {
                 db.flush().unwrap(); // rotate + tmp write + rename + publish + wal unlink
             }
             db.compact().unwrap(); // merge tmp + rename + input unlinks
-            // Trailing un-flushed puts: the next session's open replays a
-            // non-empty WAL — without these the recovery fold never runs.
+                                   // Trailing un-flushed puts: the next session's open replays a
+                                   // non-empty WAL — without these the recovery fold never runs.
             for _ in 0..4 {
                 db.put(format!("k{acked:07}"), format!("v{acked}")).unwrap();
                 progress.write_all(format!("{acked}\n").as_bytes()).unwrap();
@@ -106,8 +106,7 @@ fn crash_at_every_storage_transition() {
 
                 // Reopen must succeed and every fsync-acked write intact.
                 let progress = db_dir.join("progress");
-                let acked =
-                    std::fs::read_to_string(&progress).map(|s| s.lines().count()).unwrap_or(0);
+                let acked = std::fs::read_to_string(&progress).map(|s| s.lines().count()).unwrap_or(0);
                 let db = Db::open(Config::new(&db_dir)).unwrap();
                 for i in 0..acked as u64 {
                     let got = db.get(format!("k{i:07}")).unwrap();

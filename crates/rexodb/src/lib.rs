@@ -1046,11 +1046,11 @@ fn merge_segments(
     }
     let (count, _) = b.finish()?;
     crash::point(crash::MERGE_TMP); // merged tmp fsynced; rename pending
-    // The merged run takes the OLDEST input's slot, so it reuses that
-    // input's gen — a fresh gen would sort the output *newest* at reopen
-    // (filename order = recency) and resurrect data shadowed by younger
-    // segs that committed during the merge. Renaming over the input's path
-    // is the atomic commit; the other inputs are unlinked after.
+                                    // The merged run takes the OLDEST input's slot, so it reuses that
+                                    // input's gen — a fresh gen would sort the output *newest* at reopen
+                                    // (filename order = recency) and resurrect data shadowed by younger
+                                    // segs that committed during the merge. Renaming over the input's path
+                                    // is the atomic commit; the other inputs are unlinked after.
     let merged = if count == 0 {
         let _ = fs::remove_file(&tmp);
         None

@@ -803,8 +803,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("idle.log");
         let w = Writer::open(&path, SyncPolicy::EveryMs(10)).unwrap();
-        w.append(&[Op::Put(Bytes::from_static(b"k"), Bytes::from_static(b"v"))], false)
-            .unwrap();
+        w.append(&[Op::Put(Bytes::from_static(b"k"), Bytes::from_static(b"v"))], false).unwrap();
         // The append is queued, not necessarily written yet — give the
         // writer a moment to land it, then watch for the idle fsync.
         std::thread::sleep(Duration::from_millis(50));

@@ -119,12 +119,7 @@ fn run(ops: &[Act]) {
                 let want = model.get(&key(k)).cloned();
                 for r in &rigs {
                     let got = r.db().get(key(k)).unwrap();
-                    assert_eq!(
-                        got.as_deref(),
-                        want.as_deref(),
-                        "op {i} {a:?}: {:?} diverged",
-                        r.write_path
-                    );
+                    assert_eq!(got.as_deref(), want.as_deref(), "op {i} {a:?}: {:?} diverged", r.write_path);
                 }
             }
             Act::GetMany(ks) => {
@@ -132,7 +127,8 @@ fn run(ops: &[Act]) {
                 let want: Vec<Option<Vec<u8>>> = keys.iter().map(|k| model.get(k).cloned()).collect();
                 for r in &rigs {
                     let got = r.db().get_many(&keys).unwrap();
-                    let got: Vec<Option<Vec<u8>>> = got.iter().map(|v| v.as_ref().map(|b| b.to_vec())).collect();
+                    let got: Vec<Option<Vec<u8>>> =
+                        got.iter().map(|v| v.as_ref().map(|b| b.to_vec())).collect();
                     assert_eq!(got, want, "op {i} {a:?}: {:?} diverged", r.write_path);
                 }
             }
